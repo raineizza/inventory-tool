@@ -1,0 +1,1833 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stock-In Scanner</title>
+
+  <!-- Tailwind Play CDN: fine for a prototype. For production, build Tailwind with its CLI. -->
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: { 50: '#fff4f1', 100: '#ffe4dc', 200: '#ffc6b5', 500: '#ee4d2d', 600: '#d73a1b', 700: '#b42f15' },
+          },
+        },
+      },
+    };
+  </script>
+
+  <!-- Camera QR/barcode decoding (QR, EAN, UPC, Code 128, Code 39, ...) -->
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+
+  <style type="text/tailwindcss">
+    @layer components {
+      .card      { @apply bg-white rounded-xl border border-slate-200 shadow-sm; }
+      .card-head { @apply flex items-center justify-between gap-3 px-4 py-3 border-b border-slate-100; }
+      .card-title{ @apply font-semibold text-slate-800; }
+      .btn       { @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 h-10 text-sm font-semibold transition
+                          disabled:opacity-50 disabled:cursor-not-allowed; }
+      .btn-secondary { @apply bg-white border border-slate-300 text-slate-700 hover:bg-slate-50; }
+      .btn-primary   { @apply bg-brand-500 text-white hover:bg-brand-600; }
+      .btn-danger    { @apply bg-red-600 text-white hover:bg-red-700; }
+      .back-btn  { @apply inline-flex items-center gap-1.5 h-9 shrink-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50; }
+      .pill      { @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium whitespace-nowrap; }
+      .dot       { @apply w-2 h-2 rounded-full bg-current; }
+      .qty-btn   { @apply w-8 h-8 rounded-md border border-slate-300 bg-white text-slate-700 text-lg leading-none
+                          hover:bg-slate-100 disabled:opacity-40; }
+      .stat      { @apply rounded-lg bg-slate-50 px-3 py-2.5; }
+      .stat-label{ @apply text-xs text-slate-500; }
+      .stat-value{ @apply text-xl font-semibold tabular-nums text-slate-800; }
+      .field     { @apply w-full h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm outline-none
+                          focus:border-brand-500 focus:ring-2 focus:ring-brand-100; }
+      .field-label { @apply mb-1 block text-sm font-medium text-slate-700; }
+      .home-card { @apply relative flex flex-col items-start rounded-2xl border border-slate-200 bg-white p-5 text-left shadow-sm transition
+                          hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md
+                          focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2; }
+      .home-icon { @apply grid place-items-center w-12 h-12 shrink-0 rounded-xl; }
+      .home-meta { @apply mt-auto pt-4; }
+      .home-chip { @apply inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600; }
+      .step-num  { @apply grid place-items-center w-9 h-9 shrink-0 rounded-full bg-brand-500 text-white font-bold; }
+    }
+  </style>
+
+  <style>
+    /* Scan feedback animations */
+    @keyframes pop      { 0% { transform: scale(1); } 40% { transform: scale(1.18); } 100% { transform: scale(1); } }
+    @keyframes flashOk  { from { box-shadow: 0 0 0 4px rgb(16 185 129 / .6); } }
+    @keyframes flashWarn{ from { box-shadow: 0 0 0 4px rgb(245 158 11 / .7); } }
+    @keyframes rowFlash { from { background-color: #fed7aa; } }
+    @keyframes camHit   { from { box-shadow: inset 0 0 0 6px rgb(16 185 129); } }
+    @keyframes toastIn  { from { opacity: 0; transform: translateY(8px); } }
+    @keyframes viewIn   { from { opacity: 0; transform: translateY(6px); } }
+    .pop        { animation: pop 220ms ease-out; display: inline-block; }
+    .flash-ok   { animation: flashOk 700ms ease-out; }
+    .flash-warn { animation: flashWarn 900ms ease-out; }
+    .row-flash  { animation: rowFlash 900ms ease-out; }
+    .cam-hit    { animation: camHit 500ms ease-out; }
+    .toast      { animation: toastIn 180ms ease-out; transition: opacity 250ms, transform 250ms; }
+    .toast-out  { opacity: 0; transform: translateY(8px); }
+    [data-view]:not(.hidden) { animation: viewIn 160ms ease-out; }
+    summary::-webkit-details-marker { display: none; }
+
+    /* html5-qrcode injects a <video> into #reader */
+    #reader video { display: block; }
+    .mirror #reader video { transform: scaleX(-1); }
+
+    .spinner { width: 1.1em; height: 1.1em; border: 2px solid currentColor; border-right-color: transparent;
+               border-radius: 9999px; animation: spin 700ms linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+
+<body class="bg-slate-100 text-slate-800 antialiased min-h-screen">
+
+  <!-- ============================== HEADER ============================== -->
+  <header class="bg-white border-b border-slate-200 sticky top-0 z-30">
+    <div class="max-w-[1600px] mx-auto px-4 h-16 flex items-center gap-4">
+      <button type="button" data-go="home" title="Home" class="-m-1 flex min-w-0 items-center gap-3 rounded-lg p-1 text-left hover:bg-slate-50">
+        <span class="w-10 h-10 shrink-0 rounded-lg bg-brand-500 text-white grid place-items-center">
+          <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16.5 9.4 7.55 4.24"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05"/><path d="M12 22.08V12"/></svg>
+        </span>
+        <span class="min-w-0">
+          <span class="block text-lg font-semibold leading-tight truncate">Stock-In Scanner</span>
+          <span class="block text-xs text-slate-500 truncate"><span id="stationLabel"></span> · <span id="viewLabel">Home</span></span>
+        </span>
+      </button>
+
+      <div class="ml-auto flex items-center gap-2">
+        <span id="netPill" class="pill"></span>
+        <button id="apiPill" type="button" data-go="settings" class="pill hidden sm:inline-flex"></button>
+        <button id="soundBtn" type="button" class="w-9 h-9 grid place-items-center rounded-lg text-slate-600 hover:bg-slate-100" title="Turn beep on/off"></button>
+        <button type="button" data-go="settings" class="h-9 px-2.5 inline-flex items-center gap-2 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-100" title="Settings">
+          <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span class="hidden lg:inline">Settings</span>
+        </button>
+        <div class="hidden md:block text-right pl-3 ml-1 border-l border-slate-200">
+          <div id="clockTime" class="text-sm font-semibold tabular-nums leading-tight"></div>
+          <div id="clockDate" class="text-xs text-slate-500"></div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- =============================== HOME =============================== -->
+  <section data-view="home" class="hidden">
+    <div class="max-w-[1100px] mx-auto p-4 sm:p-6 space-y-6">
+      <div class="flex flex-wrap items-end justify-between gap-4 pt-2">
+        <div>
+          <p id="homeGreeting" class="text-sm font-medium text-brand-600"></p>
+          <h2 class="mt-1 text-2xl sm:text-3xl font-semibold text-slate-800">What would you like to do?</h2>
+        </div>
+        <p id="homeConnection" class="text-sm text-slate-500"></p>
+      </div>
+
+      <!-- Unsent count -->
+      <div id="homeResume" class="hidden flex flex-wrap items-center gap-4 rounded-2xl border border-brand-200 bg-brand-50 p-4">
+        <span class="home-icon bg-brand-500 text-white">
+          <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 12h10"/></svg>
+        </span>
+        <div class="flex-1 min-w-[200px]">
+          <p class="font-semibold text-slate-800">You have a count that hasn't been sent yet</p>
+          <p id="homeResumeText" class="text-sm text-slate-600"></p>
+        </div>
+        <button type="button" data-go="scan" class="btn btn-primary h-11 px-5">Continue counting</button>
+      </div>
+
+      <!-- What you can do -->
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <button type="button" data-go="scan" class="home-card group sm:col-span-2 min-h-[200px] border-transparent bg-gradient-to-br from-brand-500 to-brand-600 text-white hover:border-transparent">
+          <span class="home-icon w-14 h-14 bg-white/20 text-white">
+            <svg class="w-8 h-8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 12h10"/></svg>
+          </span>
+          <span class="mt-5 block text-xl font-semibold">Start counting</span>
+          <span class="mt-1 block max-w-md text-sm text-white/90">Scan items with the camera or a USB scanner, check the list, then press OK to add them to stock.</span>
+          <span class="home-meta"><span id="metaScan" class="home-chip bg-white/20 text-white"></span></span>
+          <svg class="absolute right-5 top-5 w-6 h-6 opacity-70 transition group-hover:translate-x-0.5 group-hover:opacity-100" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+        </button>
+
+        <button type="button" data-go="history" class="home-card group">
+          <span class="home-icon bg-sky-100 text-sky-600">
+            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+          </span>
+          <span class="mt-4 block text-base font-semibold text-slate-800">Sync history</span>
+          <span class="mt-1 block text-sm text-slate-500">Every count sent from this laptop, and whether it went through.</span>
+          <span class="home-meta"><span id="metaHistory" class="home-chip"></span></span>
+          <svg class="absolute right-5 top-5 w-5 h-5 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+        </button>
+
+        <button type="button" data-go="products" class="home-card group">
+          <span class="home-icon bg-emerald-100 text-emerald-600">
+            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><path d="M7 7h.01"/></svg>
+          </span>
+          <span class="mt-4 block text-base font-semibold text-slate-800">Products</span>
+          <span class="mt-1 block text-sm text-slate-500">See what this scanner recognises. Scan or type a code to look it up.</span>
+          <span class="home-meta"><span id="metaProducts" class="home-chip"></span></span>
+          <svg class="absolute right-5 top-5 w-5 h-5 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+        </button>
+
+        <button type="button" data-go="settings" class="home-card group">
+          <span class="home-icon bg-slate-100 text-slate-600">
+            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </span>
+          <span class="mt-4 block text-base font-semibold text-slate-800">Settings</span>
+          <span class="mt-1 block text-sm text-slate-500">Connect a website or use demo mode, and name this laptop.</span>
+          <span class="home-meta"><span id="metaSettings" class="home-chip"></span></span>
+          <svg class="absolute right-5 top-5 w-5 h-5 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+        </button>
+
+        <button type="button" data-go="help" class="home-card group">
+          <span class="home-icon bg-violet-100 text-violet-600">
+            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>
+          </span>
+          <span class="mt-4 block text-base font-semibold text-slate-800">How to use</span>
+          <span class="mt-1 block text-sm text-slate-500">A short guide for warehouse staff, and what to do when something goes wrong.</span>
+          <span class="home-meta"><span class="home-chip">5 steps</span></span>
+          <svg class="absolute right-5 top-5 w-5 h-5 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+        </button>
+      </div>
+
+      <!-- Today -->
+      <div class="card p-5">
+        <p class="text-sm font-semibold text-slate-700">Today on this laptop</p>
+        <div class="mt-3 grid grid-cols-3 gap-3">
+          <div class="stat"><p class="stat-label">Counts sent</p><p id="todayCounts" class="stat-value">0</p></div>
+          <div class="stat"><p class="stat-label">Units added</p><p id="todayUnits" class="stat-value">0</p></div>
+          <div class="stat"><p class="stat-label">Last sent</p><p id="todayLast" class="stat-value">—</p></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ START COUNTING ============================ -->
+  <section data-view="scan" class="hidden">
+    <div class="max-w-[1600px] mx-auto px-4 pt-4 flex items-center gap-3">
+      <button type="button" data-go="home" class="back-btn">
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
+        Home
+      </button>
+      <h2 class="text-lg font-semibold text-slate-800">Start counting</h2>
+    </div>
+
+    <main class="max-w-[1600px] mx-auto p-4 grid grid-cols-1 lg:grid-cols-12 gap-4">
+
+      <!-- ---------- Left column: scan inputs ---------- -->
+      <section class="lg:col-span-5 flex flex-col gap-4 min-w-0">
+
+        <!-- Camera -->
+        <div class="card">
+          <div class="card-head">
+            <div class="flex items-center gap-2 min-w-0">
+              <svg class="w-5 h-5 text-slate-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+              <h3 class="card-title">Camera scanner</h3>
+              <span id="camStatus" class="pill"></span>
+            </div>
+            <button id="camToggleBtn" class="btn btn-secondary"></button>
+          </div>
+          <div class="p-4 space-y-3">
+            <div id="camViewport" class="relative rounded-lg overflow-hidden bg-slate-900 min-h-[260px] flex items-center">
+              <div id="reader" class="w-full"></div>
+              <div id="camPlaceholder" class="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center text-slate-400">
+                <svg class="w-12 h-12 text-slate-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 12h10"/></svg>
+                <p class="text-sm font-medium text-slate-300">Camera is off</p>
+                <p class="text-xs">Press <b>Start camera</b> and allow camera access when the browser asks.</p>
+              </div>
+              <div id="camFlash" class="pointer-events-none absolute inset-0 rounded-lg"></div>
+            </div>
+            <div class="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+              <label class="flex items-center gap-2 min-w-0">
+                <span class="text-slate-500">Camera</span>
+                <select id="cameraSelect" class="h-9 max-w-[220px] rounded-md border border-slate-300 bg-white px-2 text-sm disabled:bg-slate-50 disabled:text-slate-400" disabled>
+                  <option value="">Default camera</option>
+                </select>
+              </label>
+              <label class="flex items-center gap-2 ml-auto select-none cursor-pointer">
+                <input id="mirrorChk" type="checkbox" class="w-4 h-4 accent-brand-500" />
+                <span class="text-slate-600">Mirror view</span>
+              </label>
+            </div>
+            <p class="text-xs text-slate-500 leading-relaxed">
+              Hold one item's code in the frame until it beeps, then take it away.
+              The same code must leave the frame for <span id="cooldownLabel"></span>&nbsp;s before it counts again.
+            </p>
+          </div>
+        </div>
+
+        <!-- USB scanner -->
+        <div class="card">
+          <div class="card-head">
+            <div class="flex items-center gap-2">
+              <svg class="w-5 h-5 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5v14"/><path d="M8 5v14"/><path d="M12 5v14"/><path d="M17 5v14"/><path d="M21 5v14"/></svg>
+              <h3 class="card-title">USB barcode scanner</h3>
+            </div>
+            <span id="kbdStatus" class="pill"></span>
+          </div>
+          <div class="p-4 space-y-3">
+            <form id="scanForm" class="flex gap-2" autocomplete="off">
+              <input id="scanInput" type="text" spellcheck="false" autocomplete="off"
+                     placeholder="Scan here, or type a code and press Enter"
+                     class="flex-1 min-w-0 h-12 px-4 rounded-lg border-2 border-slate-200 font-mono text-base outline-none focus:border-brand-500" />
+              <button type="submit" class="btn btn-secondary h-12">Add</button>
+            </form>
+            <p class="text-xs text-slate-500 leading-relaxed">
+              USB scanners type the code and press Enter, like a keyboard. On this screen,
+              keystrokes from anywhere go into this box.
+            </p>
+            <div id="testSection" class="pt-3 border-t border-dashed border-slate-200">
+              <p class="text-xs font-medium text-slate-500 mb-2">No scanner handy? Simulate a scan:</p>
+              <div id="testChips" class="flex flex-wrap gap-2"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- Right column: count, list, actions ---------- -->
+      <section class="lg:col-span-7 flex flex-col gap-4 min-w-0">
+
+        <!-- Current count + actions -->
+        <div id="countCard" class="card p-5">
+          <div class="flex items-start gap-6">
+            <div class="flex-1 min-w-0">
+              <p class="text-xs font-semibold uppercase tracking-wider text-slate-500">Now counting</p>
+              <p id="activeName" class="mt-1 text-2xl font-semibold truncate"></p>
+              <p id="activeMeta" class="mt-1 text-sm text-slate-500 font-mono truncate"></p>
+              <div id="activeBadge" class="mt-2 min-h-[26px]"></div>
+            </div>
+            <div class="text-right shrink-0">
+              <div class="text-7xl font-bold tabular-nums leading-none text-brand-500"><span id="activeCount">0</span></div>
+              <p class="text-xs text-slate-500 mt-2">units of this product</p>
+            </div>
+          </div>
+
+          <div class="mt-5 grid grid-cols-3 gap-3">
+            <div class="stat"><p class="stat-label">Products</p><p id="statProducts" class="stat-value">0</p></div>
+            <div class="stat"><p class="stat-label">Total units</p><p id="statUnits" class="stat-value">0</p></div>
+            <div class="stat"><p class="stat-label">Last scan</p><p id="statLast" class="stat-value">—</p></div>
+          </div>
+
+          <div class="mt-5 grid grid-cols-5 gap-3">
+            <button id="recountBtn"
+                    class="col-span-2 h-14 inline-flex items-center justify-center gap-2 rounded-xl border-2 border-slate-300 bg-white text-base font-semibold text-slate-700 transition hover:border-red-400 hover:text-red-600 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-slate-300 disabled:hover:text-slate-700">
+              <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+              Recount
+            </button>
+            <button id="okBtn"
+                    class="col-span-3 h-14 inline-flex items-center justify-center gap-2 rounded-xl bg-brand-500 text-base font-semibold text-white shadow-sm transition hover:bg-brand-600 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-brand-500">
+              <span id="okIcon"></span>
+              <span id="okLabel">OK — Add to stock</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Scanned items table -->
+        <div class="card flex flex-col min-h-0">
+          <div class="card-head">
+            <h3 class="card-title">Scanned items</h3>
+            <span id="itemsPill" class="pill bg-slate-100 text-slate-600"></span>
+          </div>
+          <div class="overflow-auto max-h-[440px]">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-xs uppercase tracking-wide text-slate-500 sticky top-0 z-10">
+                <tr>
+                  <th class="px-4 py-2.5 text-left font-semibold w-10">#</th>
+                  <th class="px-4 py-2.5 text-left font-semibold">Product name / ID</th>
+                  <th class="px-4 py-2.5 text-left font-semibold">QR / barcode data</th>
+                  <th class="px-4 py-2.5 text-center font-semibold">Quantity</th>
+                  <th class="px-4 py-2.5 w-12"><span class="sr-only">Remove</span></th>
+                </tr>
+              </thead>
+              <tbody id="itemsBody"></tbody>
+            </table>
+            <div id="emptyState" class="px-6 py-12 text-center">
+              <p class="text-slate-500 font-medium">Nothing scanned yet</p>
+              <p class="text-sm text-slate-400 mt-1">Scan a product with the camera or USB scanner. Each scan adds 1 to its count.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Recent counts -->
+        <div class="card">
+          <div class="card-head">
+            <h3 class="card-title">Recent counts</h3>
+            <button type="button" data-go="history" class="text-sm font-medium text-brand-600 hover:text-brand-700">View all</button>
+          </div>
+          <ul id="historyList" class="divide-y divide-slate-100"></ul>
+        </div>
+      </section>
+    </main>
+  </section>
+
+  <!-- ============================ SYNC HISTORY ============================ -->
+  <section data-view="history" class="hidden">
+    <div class="max-w-[1000px] mx-auto p-4 sm:p-6 space-y-4">
+      <div class="flex flex-wrap items-center gap-3">
+        <button type="button" data-go="home" class="back-btn">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
+          Home
+        </button>
+        <div>
+          <h2 class="text-xl font-semibold text-slate-800">Sync history</h2>
+          <p class="text-sm text-slate-500">The last 20 counts sent from this laptop. Click one to see what was in it.</p>
+        </div>
+      </div>
+      <div id="historyPageList" class="card overflow-hidden divide-y divide-slate-100"></div>
+    </div>
+  </section>
+
+  <!-- ============================== PRODUCTS ============================== -->
+  <section data-view="products" class="hidden">
+    <div class="max-w-[1000px] mx-auto p-4 sm:p-6 space-y-4">
+      <div class="flex flex-wrap items-center gap-3">
+        <button type="button" data-go="home" class="back-btn">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
+          Home
+        </button>
+        <div>
+          <h2 class="text-xl font-semibold text-slate-800">Products</h2>
+          <p class="text-sm text-slate-500">What this scanner recognises. Scanning here only looks a product up; it doesn't count it.</p>
+        </div>
+      </div>
+      <div class="card overflow-hidden">
+        <div class="flex flex-wrap gap-2 p-4 border-b border-slate-100">
+          <input id="productSearch" type="search" autocomplete="off" spellcheck="false"
+                 class="field h-11 flex-1 min-w-[220px]" placeholder="Search by name, code or ID, or scan a barcode">
+          <button id="productsReload" type="button" class="btn btn-secondary h-11">Reload list</button>
+        </div>
+        <p id="productsStatus" class="px-4 pt-3 pb-1 text-xs text-slate-500"></p>
+        <div class="overflow-auto max-h-[60vh]">
+          <table class="w-full text-sm">
+            <thead class="bg-slate-50 text-xs uppercase tracking-wide text-slate-500 sticky top-0">
+              <tr>
+                <th class="px-4 py-2.5 text-left font-semibold">Product</th>
+                <th class="px-4 py-2.5 text-left font-semibold">Code</th>
+                <th class="px-4 py-2.5 text-left font-semibold">Website ID</th>
+              </tr>
+            </thead>
+            <tbody id="productsBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== SETTINGS ============================== -->
+  <section data-view="settings" class="hidden">
+    <div class="max-w-[720px] mx-auto p-4 sm:p-6 space-y-4">
+      <div class="flex flex-wrap items-center gap-3">
+        <button type="button" data-go="home" class="back-btn">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
+          Home
+        </button>
+        <div>
+          <h2 class="text-xl font-semibold text-slate-800">Settings</h2>
+          <p class="text-sm text-slate-500">Saved on this laptop only.</p>
+        </div>
+      </div>
+      <div class="card p-5 space-y-5">
+        <div id="settingsForm"></div>
+        <p id="settingsError" class="hidden rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700"></p>
+        <div class="flex gap-2 border-t border-slate-100 pt-4">
+          <button id="settingsSave" type="button" class="btn btn-primary">Save settings</button>
+          <button type="button" data-go="home" class="btn btn-secondary">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== HOW TO USE ============================== -->
+  <section data-view="help" class="hidden">
+    <div class="max-w-[860px] mx-auto p-4 sm:p-6 space-y-4">
+      <div class="flex flex-wrap items-center gap-3">
+        <button type="button" data-go="home" class="back-btn">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
+          Home
+        </button>
+        <div>
+          <h2 class="text-xl font-semibold text-slate-800">How to use</h2>
+          <p class="text-sm text-slate-500">For warehouse staff counting newly arrived stock.</p>
+        </div>
+      </div>
+
+      <ol class="space-y-3">
+        <li class="card p-5 flex gap-4">
+          <span class="step-num">1</span>
+          <div>
+            <p class="font-semibold text-slate-800">Open Start counting</p>
+            <p class="mt-1 text-sm text-slate-600">From the home screen. The top bar shows whether the scanner is connected to the website (green) or in demo mode (orange).</p>
+          </div>
+        </li>
+        <li class="card p-5 flex gap-4">
+          <span class="step-num">2</span>
+          <div>
+            <p class="font-semibold text-slate-800">Scan each item</p>
+            <p class="mt-1 text-sm text-slate-600"><b>Camera:</b> press Start camera, hold the item's code in the frame until it beeps, then take it away.<br><b>USB scanner:</b> just scan. The counting screen catches it wherever you clicked last.</p>
+          </div>
+        </li>
+        <li class="card p-5 flex gap-4">
+          <span class="step-num">3</span>
+          <div>
+            <p class="font-semibold text-slate-800">Check the list</p>
+            <p class="mt-1 text-sm text-slate-600">Every scan adds 1 to that product. Fix mistakes with − and +, or remove a product with the bin. <b>Not recognised</b> means the website doesn't know that code: remove it, or check the product on the website.</p>
+          </div>
+        </li>
+        <li class="card p-5 flex gap-4">
+          <span class="step-num">4</span>
+          <div>
+            <p class="font-semibold text-slate-800">Press OK</p>
+            <p class="mt-1 text-sm text-slate-600">Check the summary, then press Confirm. The units are added to the website's stock and the screen clears for the next product.</p>
+          </div>
+        </li>
+        <li class="card p-5 flex gap-4">
+          <span class="step-num">5</span>
+          <div>
+            <p class="font-semibold text-slate-800">Start over if you need to</p>
+            <p class="mt-1 text-sm text-slate-600">Recount clears everything on the screen. Nothing is sent.</p>
+          </div>
+        </li>
+      </ol>
+
+      <div class="card p-5">
+        <p class="font-semibold text-slate-800">If something goes wrong</p>
+        <ul class="mt-2 list-disc space-y-1.5 pl-5 text-sm text-slate-600">
+          <li><b>"Website not connected"</b> in the top bar: click it to open Settings, then press Test connection.</li>
+          <li><b>No answer from the website</b> after OK: press OK again without changing the count. It won't be added twice.</li>
+          <li><b>The camera won't start:</b> allow camera access in the address bar, and close other apps that use the camera.</li>
+          <li><b>Closed the page by accident?</b> The count is kept. Open the scanner again and press Continue counting.</li>
+        </ul>
+      </div>
+
+      <div class="card p-5">
+        <p class="font-semibold text-slate-800">For admins</p>
+        <p class="mt-1 text-sm text-slate-600">To connect a website, install its <b>stock-api</b> folder, open <b>stock-api/setup.php</b> on that website, then copy the API address and token into Settings.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Toasts -->
+  <div id="toastHost" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 w-[380px] max-w-[calc(100vw-2rem)]"></div>
+
+  <!-- Modal -->
+  <div id="modal" class="fixed inset-0 z-40 hidden">
+    <div id="modalBackdrop" class="absolute inset-0 bg-slate-900/50"></div>
+    <div class="relative h-full flex items-center justify-center p-4 pointer-events-none">
+      <div id="modalPanel" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="modalTitle"
+           class="pointer-events-auto bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-full overflow-auto outline-none">
+        <div class="px-6 pt-5"><h3 id="modalTitle" class="text-lg font-semibold text-slate-800"></h3></div>
+        <div id="modalBody" class="px-6 py-4 text-sm text-slate-600"></div>
+        <p id="modalError" class="hidden mx-6 mb-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700"></p>
+        <div class="px-6 py-4 bg-slate-50 rounded-b-2xl flex justify-end gap-2">
+          <button id="modalCancel" class="btn btn-secondary">Cancel</button>
+          <button id="modalConfirm" class="btn btn-primary">Confirm</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+// =====================================================================
+// SETTINGS
+// =====================================================================
+// What a new laptop starts with. Staff change these on the Settings page;
+// they're saved in this browser.
+const DEFAULT_SETTINGS = {
+  mode: 'demo',               // 'demo' = sample products, nothing is sent. 'website' = connected to a stock-api.
+  apiUrl: '',                 // both shown on the website's stock-api/setup.php page
+  apiToken: '',
+  stationId: 'WH-LAPTOP-01',  // saved with each count, to tell laptops apart
+};
+
+const REQUEST_TIMEOUT_MS = 15000;
+
+// Camera only: the same code must be out of view this long before it counts again,
+// so holding one item in front of the camera counts it once.
+const SAME_CODE_COOLDOWN_MS = 1500;
+
+// Sample products for demo mode.
+const DEMO_SITE = 'shop.example';
+const DEMO_PRODUCTS = [
+  { id: '101', code: 'SKU-1001', name: 'Wireless Optical Mouse' },
+  { id: '102', code: 'SKU-1002', name: 'USB-C Fast Charging Cable 1m' },
+  { id: '103', code: 'SKU-1003', name: 'Bluetooth Earbuds Pro' },
+  { id: '104', code: 'SKU-1004', name: 'Phone Case iPhone 15 – Black' },
+  { id: '105', code: 'SKU-1005', name: 'Aluminium Laptop Stand' },
+  { id: '106', code: '4801234567897', name: 'Bottled Water 500ml' },
+];
+
+// Buttons under "Simulate a scan" (demo mode only).
+const DEMO_SCANS = [
+  { label: 'Wireless Mouse', code: 'SKU-1001' },
+  { label: 'USB-C Cable', code: 'SKU-1002' },
+  { label: 'Earbuds (JSON QR)', code: '{"code":"SKU-1003","name":"Bluetooth Earbuds Pro"}' },
+  { label: 'Phone case (product link QR)', code: `https://${DEMO_SITE}/products/104` },
+  { label: 'Water (EAN-13)', code: '4801234567897' },
+  { label: 'Unknown item', code: 'SKU-9999' },
+];
+
+// The app's pages, reached from the home screen (and the browser's back button).
+const VIEWS = {
+  home: 'Home',
+  scan: 'Start counting',
+  history: 'Sync history',
+  products: 'Products',
+  settings: 'Settings',
+  help: 'How to use',
+};
+
+// =====================================================================
+// STATE & STORAGE
+// =====================================================================
+const KEYS = {
+  session: 'stockin.session.v2',
+  history: 'stockin.history.v1',
+  prefs: 'stockin.prefs.v1',
+  settings: 'stockin.settings.v1',
+};
+
+function load(key, fallback) {
+  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; }
+}
+function store(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage unavailable */ }
+}
+
+const settings = Object.assign({}, DEFAULT_SETTINGS, load(KEYS.settings, {}));
+const isLive = () => settings.mode === 'website';
+
+const state = {
+  items: [],        // { key, productId, code, name, known, ambiguous, qrData, quantity, lastScannedAt }
+  activeKey: null,  // item shown in "Now counting"
+  lastScanAt: null,
+  batchId: null,    // kept (and saved) until the count changes, so a retry is recognised as the same count
+  submitting: false,
+  history: load(KEYS.history, []),
+};
+const prefs = Object.assign({ sound: true, mirror: true, cameraId: '' }, load(KEYS.prefs, {}));
+const ui = { modalOpen: false, view: 'home' };
+
+// The unsent count survives a page refresh or accidental tab close.
+const saved = load(KEYS.session, null);
+if (saved && Array.isArray(saved.items)) {
+  state.items = saved.items;
+  state.activeKey = saved.activeKey ?? null;
+  state.lastScanAt = saved.lastScanAt ?? null;
+  state.batchId = saved.batchId ?? null;
+}
+
+const saveSession = () => store(KEYS.session, {
+  items: state.items, activeKey: state.activeKey, lastScanAt: state.lastScanAt, batchId: state.batchId,
+});
+const savePrefs = () => store(KEYS.prefs, prefs);
+const totalUnits = () => state.items.reduce((sum, i) => sum + i.quantity, 0);
+const findItem = key => state.items.find(i => i.key === key);
+
+function countChanged() {
+  state.batchId = null;
+  saveSession();
+}
+
+function makeBatchId() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  const rand = Math.random().toString(16).slice(2, 6);
+  return `B-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}-${rand}`;
+}
+
+// =====================================================================
+// PAGES
+// =====================================================================
+function viewFromHash() {
+  const view = location.hash.replace(/^#/, '');
+  return Object.prototype.hasOwnProperty.call(VIEWS, view) ? view : 'home';
+}
+
+function go(view) {
+  if (location.hash === `#${view}`) showView(view);
+  else location.hash = view;  // the hashchange listener shows it
+}
+
+function showView(view) {
+  if (ui.modalOpen) closeModal(false);
+  if (view !== 'scan' && cam.running) stopCamera();
+  ui.view = view;
+  document.querySelectorAll('[data-view]').forEach(el => el.classList.toggle('hidden', el.dataset.view !== view));
+  $('viewLabel').textContent = VIEWS[view];
+  document.title = view === 'home' ? 'Stock-In Scanner' : `${VIEWS[view]} · Stock-In Scanner`;
+  window.scrollTo(0, 0);
+
+  if (view === 'scan') {
+    render();
+    focusScanner();
+  } else if (view === 'settings') {
+    renderSettingsView();
+  } else {
+    refreshView();
+  }
+  if (view === 'products') $('productSearch').focus();
+}
+
+// Re-draws the current page after something changed (except Settings, which would lose unsaved edits).
+function refreshView() {
+  if (ui.view === 'home') renderHome();
+  if (ui.view === 'history') renderHistoryPage();
+  if (ui.view === 'products') renderProducts();
+}
+
+// =====================================================================
+// PRODUCT LIST
+// =====================================================================
+// The products the scanner can recognise: loaded from the website, or DEMO_PRODUCTS in demo mode.
+const catalog = {
+  status: 'idle',       // idle | loading | ready | failed
+  message: '',
+  products: new Map(),  // id → { id, code, name }
+  codes: new Map(),     // CODE → id, or null when the code belongs to more than one product
+};
+
+// Codes match regardless of letter case and surrounding spaces, the same way the website matches them.
+const normCode = code => String(code ?? '').trim().replace(/[a-z]/g, c => c.toUpperCase());
+
+function setCatalog(products, codes) {
+  catalog.products = new Map(products.map(p => [String(p.id), { id: String(p.id), code: String(p.code ?? p.id), name: String(p.name ?? '') }]));
+  catalog.codes = new Map(Object.entries(codes).map(([code, id]) => [normCode(code), id === null ? null : String(id)]));
+}
+
+function demoCodes() {
+  const codes = {};
+  for (const p of DEMO_PRODUCTS) {
+    codes[p.code] = p.id;
+    codes[p.id] = p.id;  // like a website that also matches product IDs (from product link QR codes)
+  }
+  return codes;
+}
+
+async function loadCatalog() {
+  if (!isLive()) {
+    setCatalog(DEMO_PRODUCTS, demoCodes());
+    catalog.status = 'ready';
+    catalog.message = '';
+  } else if (!settings.apiUrl || !settings.apiToken) {
+    setCatalog([], {});
+    catalog.status = 'failed';
+    catalog.message = 'Open Settings and enter the API address and token from the website.';
+  } else {
+    catalog.status = 'loading';
+    renderStatus();
+    refreshView();
+    try {
+      const data = await apiRequest('GET');
+      setCatalog(data.products || [], data.codes || {});
+      catalog.status = 'ready';
+      catalog.message = '';
+    } catch (err) {
+      catalog.status = 'failed';
+      catalog.message = err.message;
+      toast(`Couldn't load the product list. ${err.message} Scans still count, but products won't be recognised until it loads.`, 'error', 9000);
+    }
+  }
+  reresolveItems();
+  render();
+  renderStatus();
+  renderTestChips();
+}
+
+// Matches items scanned before the product list arrived (or under other settings) to their products.
+function reresolveItems() {
+  const signature = () => JSON.stringify(state.items.map(i => [i.key, i.productId, i.quantity]));
+  const before = signature();
+  const activeRaw = findItem(state.activeKey)?.qrData;
+  const merged = [];
+  for (const item of state.items) {
+    const resolved = resolveScan(item.qrData);
+    const same = merged.find(m => m.key === resolved.key);
+    if (same) {
+      same.quantity += item.quantity;
+      same.lastScannedAt = Math.max(same.lastScannedAt, item.lastScannedAt);
+    } else {
+      merged.push({ ...item, ...resolved });
+    }
+  }
+  state.items = merged;
+  if (activeRaw !== undefined) state.activeKey = resolveScan(activeRaw).key;
+  if (signature() !== before) state.batchId = null;
+  saveSession();
+}
+
+// =====================================================================
+// TALKING TO THE WEBSITE  (stock-api/index.php)
+// =====================================================================
+//   GET  → product list:  { products: [{id, code, name}], codes: {CODE: id|null} }
+//   POST → add a count:   { batchId, stationId, items: [{productId, code, quantity}] }
+async function apiRequest(method, body = null, conn = settings) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    let res, text;
+    try {
+      res = await fetch(conn.apiUrl, {
+        method,
+        headers: {
+          'Accept': 'application/json',
+          'Authorization': `Bearer ${conn.apiToken}`,
+          ...(body ? { 'Content-Type': 'application/json', 'Idempotency-Key': body.batchId } : {}),
+        },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+      text = await res.text();
+    } catch (err) {
+      // No answer: offline, wrong address, or too slow. A POST may still have arrived.
+      throw Object.assign(new Error(err.name === 'AbortError'
+        ? 'The website took too long to answer.'
+        : "The website couldn't be reached. Check the internet connection and the API address."), { noResponse: true });
+    }
+    let data = null;
+    try { data = JSON.parse(text); } catch { /* not JSON */ }
+    if (!data || typeof data !== 'object') {
+      throw Object.assign(new Error(res.ok
+        ? "That address didn't answer like the stock API. Check the API address in Settings."
+        : `The website answered with error ${res.status}.`), { status: res.status });
+    }
+    if (!res.ok || data.success === false) {
+      throw Object.assign(new Error(data.message || `The website answered with error ${res.status}.`), { status: res.status, data });
+    }
+    return data;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function buildPayload() {
+  if (!state.batchId) {
+    state.batchId = makeBatchId();
+    saveSession();  // saved before sending, so a retry after a reload reuses it
+  }
+  return {
+    batchId: state.batchId,
+    stationId: settings.stationId,
+    submittedAt: new Date().toISOString(),
+    totalQuantity: totalUnits(),
+    items: state.items.map(i => ({ productId: i.productId, code: i.code, quantity: i.quantity })),
+  };
+}
+
+async function sendStockUpdate(payload) {
+  if (isLive()) return apiRequest('POST', payload);
+
+  // Demo mode: answer the way the website would, without sending anything.
+  await new Promise(r => setTimeout(r, 700));
+  const unknown = payload.items.filter(i => i.productId === null).map(i => i.code);
+  if (unknown.length) {
+    throw Object.assign(new Error(`Not found on this website: ${unknown.join(', ')}. Remove these from the count (or fix them on the website), then press OK again.`), { status: 422 });
+  }
+  console.info('[demo] would POST', payload);
+  return { success: true, demo: true, items: [] };
+}
+
+function siteName() {
+  try { return new URL(settings.apiUrl).hostname; } catch { return 'the website'; }
+}
+
+// =====================================================================
+// SCANNING
+// =====================================================================
+
+// Pulls the product code out of what was scanned:
+//   plain code          SKU-1001  /  4801234567897  /  SIGA-OSD FCN
+//   JSON                {"code":"SKU-1001","name":"..."}  (also sku / productId / id)
+//   pipe-separated      SKU-1001|Wireless Optical Mouse
+//   product page link   https://<this website>/products/1286  (or ?sku= / ?code= / ?id=)
+function extractCode(raw) {
+  if (raw.startsWith('{')) {
+    try {
+      const obj = JSON.parse(raw);
+      const code = obj.code ?? obj.sku ?? obj.productId ?? obj.id;
+      if (code !== undefined && code !== null && String(code).trim()) {
+        return { code: String(code).trim(), label: obj.name ?? null };
+      }
+    } catch { /* not JSON — use as a plain code */ }
+  }
+  if (/^https?:\/\//i.test(raw)) {
+    const code = websiteLinkCode(raw);
+    if (code) return { code, label: null };
+  }
+  const pipe = raw.indexOf('|');
+  if (pipe > 0) return { code: raw.slice(0, pipe).trim(), label: raw.slice(pipe + 1).trim() || null };
+  return { code: raw, label: null };
+}
+
+// Only links to the connected website count. A manufacturer's QR link on a box could
+// otherwise end in a number that happens to be one of the website's product IDs.
+function websiteLinkCode(raw) {
+  try {
+    const url = new URL(raw);
+    const site = isLive() ? new URL(settings.apiUrl).hostname : DEMO_SITE;
+    const bare = host => host.toLowerCase().replace(/^www\./, '');
+    if (bare(url.hostname) !== bare(site)) return null;
+    for (const key of ['sku', 'code', 'productId', 'id']) {
+      const value = url.searchParams.get(key);
+      if (value) return value.trim();
+    }
+    const last = url.pathname.split('/').filter(Boolean).pop();
+    return last ? decodeURIComponent(last).trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveScan(raw) {
+  const { code, label } = extractCode(raw);
+  const norm = normCode(code);
+  if (catalog.codes.has(norm)) {
+    const id = catalog.codes.get(norm);
+    if (id === null) {
+      return { key: `code:${norm}`, productId: null, code, name: label || 'Matches several products', known: false, ambiguous: true };
+    }
+    const product = catalog.products.get(id);
+    if (product) {
+      return { key: `id:${id}`, productId: id, code: product.code, name: product.name || product.code, known: true, ambiguous: false };
+    }
+  }
+  return { key: `code:${norm}`, productId: null, code, name: label || 'Unregistered item', known: false, ambiguous: false };
+}
+
+function scanningBlocked() {
+  return ui.modalOpen || state.submitting;
+}
+
+function registerScan(raw, source) {
+  const scanned = String(raw ?? '').trim();
+  if (!scanned) return;
+  if (scanningBlocked()) {
+    if (source !== 'camera') {
+      toast(state.submitting ? 'Scan ignored: still sending the last count.' : 'Scan ignored: close the open dialog first.', 'warn');
+      beep('error');
+    }
+    return;
+  }
+
+  const resolved = resolveScan(scanned);
+  let item = findItem(resolved.key);
+  if (!item) {
+    item = { ...resolved, qrData: scanned, quantity: 0, lastScannedAt: null };
+    state.items.push(item);
+  }
+  item.quantity += 1;
+  item.qrData = scanned;
+  item.lastScannedAt = Date.now();
+  state.activeKey = item.key;
+  state.lastScanAt = item.lastScannedAt;
+  countChanged();
+
+  render({ flashKey: item.key });
+  scanFeedback(item.known, source);
+}
+
+// --- Camera (html5-qrcode) ---
+const cam = { instance: null, running: false, busy: false, lastCode: null, lastSeenAt: 0 };
+
+function onCameraDecode(text) {
+  // The decoder fires ~10x per second while a code is in view. Only count when the
+  // code is new, or when the same code has been out of view for the cooldown period.
+  const now = Date.now();
+  const sameCode = text === cam.lastCode;
+  const gap = now - cam.lastSeenAt;
+  cam.lastCode = text;
+  cam.lastSeenAt = now;
+  if (sameCode && gap < SAME_CODE_COOLDOWN_MS) return;
+  registerScan(text, 'camera');
+}
+
+function supportedFormats() {
+  const F = window.Html5QrcodeSupportedFormats;
+  return ['QR_CODE', 'DATA_MATRIX', 'EAN_13', 'EAN_8', 'UPC_A', 'UPC_E', 'CODE_128', 'CODE_39', 'CODE_93', 'ITF', 'CODABAR']
+    .map(k => F[k]).filter(v => v !== undefined);
+}
+
+function scanBox(viewWidth, viewHeight) {
+  // Wide box so 1D barcodes fit as well as QR codes.
+  const width = Math.max(150, Math.floor(viewWidth * 0.75));
+  const height = Math.max(100, Math.floor(Math.min(viewHeight * 0.7, width)));
+  return { width, height };
+}
+
+async function startCamera() {
+  if (!window.Html5Qrcode) {
+    toast('The camera scanning library did not load. Check the internet connection and reload the page.', 'error', 7000);
+    return;
+  }
+  cam.busy = true;
+  renderCamera();
+  try {
+    const cameras = await Html5Qrcode.getCameras(); // asks for camera permission
+    if (!cameras.length) throw new Error('NotFoundError');
+    fillCameraSelect(cameras);
+    cam.instance ??= new Html5Qrcode('reader', {
+      verbose: false,
+      formatsToSupport: supportedFormats(),
+      useBarCodeDetectorIfSupported: true,
+      experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+    });
+    const cameraId = $('cameraSelect').value || cameras[0].id;
+    await cam.instance.start(cameraId, { fps: 12, qrbox: scanBox }, onCameraDecode, () => {});
+    cam.running = true;
+    prefs.cameraId = cameraId;
+    savePrefs();
+    // Left the counting screen while the camera was starting: turn it off again.
+    if (ui.view !== 'scan') {
+      try { await cam.instance.stop(); } catch { /* already stopped */ }
+      disposeScanner();
+      cam.running = false;
+    }
+  } catch (err) {
+    cam.running = false;
+    disposeScanner();
+    console.error('Camera error:', err);
+    toast(cameraErrorMessage(err), 'error', 8000);
+  } finally {
+    cam.busy = false;
+    renderCamera();
+  }
+}
+
+async function stopCamera() {
+  if (!cam.instance || !cam.running) return;
+  cam.busy = true;
+  renderCamera();
+  try {
+    await cam.instance.stop();
+  } catch (err) {
+    console.warn('Camera stop error:', err);
+  }
+  disposeScanner();
+  cam.running = false;
+  cam.busy = false;
+  renderCamera();
+}
+
+function disposeScanner() {
+  try { cam.instance?.clear(); } catch { /* already cleared */ }
+  cam.instance = null;
+}
+
+function fillCameraSelect(cameras) {
+  const select = $('cameraSelect');
+  const wanted = cameras.some(c => c.id === prefs.cameraId) ? prefs.cameraId : cameras[0].id;
+  select.innerHTML = cameras
+    .map((c, i) => `<option value="${esc(c.id)}">${esc(c.label || `Camera ${i + 1}`)}</option>`)
+    .join('');
+  select.value = wanted;
+}
+
+function cameraErrorMessage(err) {
+  const text = String(err?.name || '') + ' ' + String(err?.message || err);
+  if (/NotAllowed|Permission/i.test(text)) return 'Camera access was blocked. Click the camera icon in the address bar, allow access, then press Start camera again.';
+  if (/NotFound|Requested device not found|no camera/i.test(text)) return 'No camera found. Plug in a webcam, or use the USB scanner box instead.';
+  if (/NotReadable|Could not start|in use/i.test(text)) return 'The camera is being used by another app (Zoom, Teams, Camera…). Close it and try again.';
+  return `Could not start the camera: ${String(err?.message || err)}`;
+}
+
+// --- USB scanner (keyboard wedge) ---
+function focusScanner() {
+  if (!ui.modalOpen && ui.view === 'scan') $('scanInput').focus({ preventScroll: true });
+}
+
+function isTextField(el) {
+  if (!el) return false;
+  if (el.tagName === 'TEXTAREA') return true;
+  return el.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit', 'range'].includes(el.type);
+}
+
+// =====================================================================
+// ACTIONS: OK / Recount / row edits
+// =====================================================================
+async function onOk() {
+  if (!state.items.length || state.submitting) return;
+  const payload = buildPayload();
+  const unrecognised = state.items.filter(i => !i.known).length;
+  const listMissing = isLive() && catalog.status !== 'ready';
+
+  const rows = state.items.map(i => `
+    <tr class="border-b border-slate-100 last:border-0">
+      <td class="py-2 pr-3">
+        <div class="font-medium ${i.known ? 'text-slate-800' : 'text-amber-700'}">${esc(i.name)}</div>
+        <div class="text-xs font-mono text-slate-500">${esc(i.code)}${i.productId ? ` · ID ${esc(i.productId)}` : ''}</div>
+      </td>
+      <td class="py-2 text-right text-base font-semibold tabular-nums text-slate-800">+${i.quantity}</td>
+    </tr>`).join('');
+
+  let warning = '';
+  if (listMissing) {
+    warning = "The product list didn't load, so the website will match the codes itself and refuse the count if any are unknown.";
+  } else if (unrecognised) {
+    warning = `${plural(unrecognised, 'product')} ${unrecognised === 1 ? "isn't" : "aren't"} recognised. The website will refuse the whole count until ${unrecognised === 1 ? "it's" : "they're"} removed.`;
+  }
+
+  const confirmed = await openModal({
+    title: 'Add this count to stock?',
+    confirmText: `Confirm — add ${plural(payload.totalQuantity, 'unit')}`,
+    body: `
+      <p>These quantities will be <b>added</b> to the stock ${isLive() ? `on <b>${esc(siteName())}</b>` : 'on the website'}.</p>
+      <div class="mt-3 max-h-56 overflow-auto rounded-lg border border-slate-200 px-3">
+        <table class="w-full">${rows}</table>
+      </div>
+      <div class="mt-3 flex justify-between text-base font-semibold text-slate-800">
+        <span>Total</span><span class="tabular-nums">${plural(payload.totalQuantity, 'unit')}</span>
+      </div>
+      ${warning ? `<p class="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-amber-800">${warning}</p>` : ''}
+      <p class="mt-3 text-xs text-slate-500">${isLive() ? `POST → ${esc(settings.apiUrl)}` : 'Demo mode: nothing is sent.'}</p>
+      <details class="mt-2 text-xs">
+        <summary class="cursor-pointer text-slate-500 hover:text-slate-700">View JSON payload</summary>
+        <pre class="mt-2 max-h-48 overflow-auto rounded-lg bg-slate-900 p-3 text-slate-100">${esc(JSON.stringify(payload, null, 2))}</pre>
+      </details>`,
+  });
+  if (confirmed) await submitCount();
+}
+
+async function submitCount() {
+  const payload = buildPayload();
+  const items = state.items.map(i => ({ name: i.name, code: i.code, quantity: i.quantity }));
+  const live = isLive();
+  state.submitting = true;
+  render();
+  try {
+    const result = await sendStockUpdate(payload);
+    addHistory({ ok: true, demo: !live, duplicate: Boolean(result.duplicate), payload, items });
+    resetSession();
+    beep('done');
+    toast(successMessage(result, payload, live), 'success', 6000);
+  } catch (err) {
+    const message = endSentence(err.message || 'Something went wrong.');
+    addHistory({ ok: false, message, payload, items });
+    beep('error');
+    if (err.noResponse) {
+      toast(`${message} Press OK again to retry, without changing the count: if the first try got through, it won't be added twice.`, 'error', 12000);
+    } else {
+      toast(`Not sent: ${message} The count is kept.`, 'error', 10000);
+    }
+  } finally {
+    state.submitting = false;
+    render();
+    focusScanner();
+  }
+}
+
+function successMessage(result, payload, live) {
+  const units = plural(payload.totalQuantity, 'unit');
+  const next = ' Ready for the next product.';
+  if (result.duplicate) return endSentence(result.message || 'This count was already received, so it was not added twice.') + next;
+  if (!live) return `Demo: ${units} across ${plural(payload.items.length, 'product')} would be added. Nothing was sent.` + next;
+  const lines = result.items || [];
+  if (lines.length === 1 && lines[0].newStock !== null && lines[0].newStock !== undefined) {
+    return `Added ${units} of ${lines[0].name || lines[0].code}. Stock is now ${lines[0].newStock}.` + next;
+  }
+  return `Added ${units} across ${plural(lines.length || payload.items.length, 'product')}.` + next;
+}
+
+async function onRecount() {
+  if (!state.items.length || state.submitting) return;
+  const units = totalUnits();
+  const confirmed = await openModal({
+    title: 'Clear the count and start over?',
+    tone: 'danger',
+    confirmText: 'Clear and recount',
+    body: `<p>This removes all <b>${plural(units, 'scanned unit')}</b> (${plural(state.items.length, 'product')}) from this screen. Nothing is sent to the website.</p>`,
+  });
+  if (!confirmed) return;
+  resetSession();
+  toast('Count cleared. Start scanning again.', 'info');
+}
+
+function resetSession() {
+  state.items = [];
+  state.activeKey = null;
+  state.lastScanAt = null;
+  cam.lastCode = null;
+  countChanged();
+  render();
+}
+
+function changeQuantity(key, delta) {
+  const item = findItem(key);
+  if (!item || state.submitting) return;
+  if (item.quantity + delta < 1) { confirmRemove(key); return; }
+  item.quantity += delta;
+  state.activeKey = key;
+  countChanged();
+  render();
+}
+
+async function confirmRemove(key) {
+  const item = findItem(key);
+  if (!item || state.submitting) return;
+  const confirmed = await openModal({
+    title: 'Remove this product from the count?',
+    tone: 'danger',
+    confirmText: 'Remove',
+    body: `<p><b>${esc(item.name)}</b> <span class="font-mono text-xs text-slate-500">${esc(item.code)}</span><br>${plural(item.quantity, 'scanned unit')} will be removed.</p>`,
+  });
+  if (!confirmed) return;
+  state.items = state.items.filter(i => i.key !== key);
+  if (state.activeKey === key) state.activeKey = state.items.at(-1)?.key ?? null;
+  countChanged();
+  render();
+}
+
+function addHistory({ ok, demo = false, duplicate = false, message = '', payload, items }) {
+  state.history.unshift({
+    ok, demo, duplicate, message,
+    batchId: payload.batchId,
+    at: Date.now(),
+    totalQuantity: payload.totalQuantity,
+    lines: payload.items.length,
+    items: items.slice(0, 100),
+  });
+  state.history = state.history.slice(0, 20);
+  store(KEYS.history, state.history);
+}
+
+// =====================================================================
+// SETTINGS PAGE
+// =====================================================================
+function renderSettingsView() {
+  $('settingsForm').innerHTML = settingsFormHtml();
+  $('settingsError').classList.add('hidden');
+  wireSettingsForm();
+}
+
+async function saveSettings() {
+  const values = readSettingsForm();
+  const problem = settingsProblem(values);
+  if (problem) {
+    $('settingsError').textContent = problem;
+    $('settingsError').classList.remove('hidden');
+    return;
+  }
+  const connectionChanged = ['mode', 'apiUrl', 'apiToken'].some(k => values[k] !== settings[k]);
+  Object.assign(settings, values);
+  store(KEYS.settings, settings);
+  renderStatus();
+  toast('Settings saved.', 'success');
+  go('home');
+  if (connectionChanged || catalog.status !== 'ready') await loadCatalog();
+}
+
+function settingsFormHtml() {
+  const mode = (value, title, text) => `
+    <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 p-3 has-[:checked]:border-brand-500 has-[:checked]:bg-brand-50">
+      <input type="radio" name="setMode" value="${value}" class="mt-1 accent-brand-500" ${settings.mode === value ? 'checked' : ''}>
+      <span><span class="block font-semibold text-slate-800">${title}</span><span class="block text-xs text-slate-500">${text}</span></span>
+    </label>`;
+  return `
+    <div class="space-y-5">
+      <div>
+        <p class="field-label">Mode</p>
+        <div class="grid gap-2 sm:grid-cols-2">
+          ${mode('demo', 'Demo', 'Sample products. Nothing is sent anywhere.')}
+          ${mode('website', 'Website', 'Adds counted stock to a website that has the stock-api folder.')}
+        </div>
+      </div>
+      <div id="setWebsite" class="space-y-3 ${isLive() ? '' : 'hidden'}">
+        <div>
+          <label class="field-label" for="setApiUrl">API address</label>
+          <input id="setApiUrl" type="url" class="field font-mono" placeholder="https://your-website.com/stock-api/index.php" value="${esc(settings.apiUrl)}">
+        </div>
+        <div>
+          <label class="field-label" for="setApiToken">API token</label>
+          <div class="flex gap-2">
+            <input id="setApiToken" type="password" class="field font-mono" autocomplete="off" value="${esc(settings.apiToken)}">
+            <button type="button" id="setTokenToggle" class="btn btn-secondary">Show</button>
+          </div>
+          <p class="mt-1 text-xs text-slate-500">Both are on the website's <b>stock-api/setup.php</b> page, under "Connect the scanner".</p>
+          <a id="setSetupLink" href="#" target="_blank" rel="noopener" class="hidden mt-1 inline-block text-xs font-medium text-brand-600 hover:underline">Open this website's setup page ↗</a>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <button type="button" id="setTest" class="btn btn-secondary">Test connection</button>
+          <span id="setTestResult" class="text-sm"></span>
+        </div>
+      </div>
+      <div>
+        <label class="field-label" for="setStation">Station name</label>
+        <input id="setStation" class="field" maxlength="100" value="${esc(settings.stationId)}">
+        <p class="mt-1 text-xs text-slate-500">Saved with each count, so you can tell the laptops apart.</p>
+      </div>
+    </div>`;
+}
+
+function wireSettingsForm() {
+  document.querySelectorAll('input[name="setMode"]').forEach(radio => radio.addEventListener('change', () => {
+    $('setWebsite').classList.toggle('hidden', readSettingsForm().mode !== 'website');
+  }));
+  $('setTokenToggle').addEventListener('click', () => {
+    const field = $('setApiToken');
+    field.type = field.type === 'password' ? 'text' : 'password';
+    $('setTokenToggle').textContent = field.type === 'password' ? 'Show' : 'Hide';
+  });
+  const updateSetupLink = () => {
+    const link = $('setSetupLink');
+    try {
+      const url = new URL('setup.php', $('setApiUrl').value.trim());
+      if (!/^https?:$/.test(url.protocol)) throw new Error('not a web address');
+      link.href = url.href;
+      link.classList.remove('hidden');
+    } catch {
+      link.classList.add('hidden');
+    }
+  };
+  $('setApiUrl').addEventListener('input', updateSetupLink);
+  updateSetupLink();
+  $('setTest').addEventListener('click', async () => {
+    const values = { ...readSettingsForm(), mode: 'website' };
+    const out = $('setTestResult');
+    const problem = settingsProblem(values);
+    if (problem) {
+      out.className = 'text-sm text-red-600';
+      out.textContent = problem;
+      return;
+    }
+    out.className = 'text-sm text-slate-500';
+    out.textContent = 'Connecting…';
+    try {
+      const data = await apiRequest('GET', null, values);
+      out.className = 'text-sm text-emerald-700';
+      out.textContent = `Connected: ${Number(data.count || 0).toLocaleString()} products.`;
+    } catch (err) {
+      out.className = 'text-sm text-red-600';
+      out.textContent = err.message;
+    }
+  });
+}
+
+function readSettingsForm() {
+  return {
+    mode: document.querySelector('input[name="setMode"]:checked')?.value === 'website' ? 'website' : 'demo',
+    apiUrl: $('setApiUrl').value.trim(),
+    apiToken: $('setApiToken').value.trim(),
+    stationId: $('setStation').value.trim() || DEFAULT_SETTINGS.stationId,
+  };
+}
+
+function settingsProblem(values) {
+  if (values.mode !== 'website') return null;
+  if (!/^https?:\/\/\S+$/i.test(values.apiUrl)) return 'Enter the API address from the website. It starts with https:// (or http:// on a local test server).';
+  if (!values.apiToken) return 'Enter the API token from the website.';
+  return null;
+}
+
+// The website's setup page can open the scanner with "#connect=<settings>". Ask first, so a
+// link from someone else can't quietly send this laptop's counts to another website.
+async function applyConnectLink() {
+  const match = location.hash.match(/^#connect=([A-Za-z0-9_-]+)$/);
+  if (!match) return;
+  history.replaceState(null, '', location.pathname + location.search);
+  let conn, host;
+  try {
+    conn = JSON.parse(atob(match[1].replace(/-/g, '+').replace(/_/g, '/')));
+    host = new URL(conn.apiUrl).host;
+  } catch {
+    return;
+  }
+  if (!/^https?:\/\//i.test(conn.apiUrl) || typeof conn.apiToken !== 'string' || !conn.apiToken) return;
+  const confirmed = await openModal({
+    title: 'Connect this scanner?',
+    confirmText: 'Connect',
+    body: `<p>Connect this scanner to <b>${esc(host)}</b>? Counts you confirm will be added to that website's stock.</p>`,
+  });
+  if (!confirmed) return;
+  Object.assign(settings, { mode: 'website', apiUrl: conn.apiUrl, apiToken: conn.apiToken });
+  store(KEYS.settings, settings);
+  toast(`Connected to ${host}.`, 'success');
+}
+
+// =====================================================================
+// RENDERING
+// =====================================================================
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmtTime = ts => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const fmtShortTime = ts => new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+const fmtDateTime = ts => new Date(ts).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+const plural = (n, word) => `${n.toLocaleString()} ${word}${n === 1 ? '' : 's'}`;
+const endSentence = s => (/[.!?]$/.test(s.trim()) ? s.trim() : `${s.trim()}.`);
+const isToday = ts => new Date(ts).toDateString() === new Date().toDateString();
+
+const ICONS = {
+  check: '<svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+  trash: '<svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>',
+  soundOn: '<svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>',
+  soundOff: '<svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5z"/><path d="m23 9-6 6"/><path d="m17 9 6 6"/></svg>',
+  chevron: '<svg class="w-4 h-4 shrink-0 text-slate-400 transition group-open:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>',
+};
+
+function itemBadge(item) {
+  if (item.ambiguous) return '<span class="pill bg-amber-100 text-amber-800">Code used by several products</span>';
+  if (!item.known) return '<span class="pill bg-amber-100 text-amber-800">Not recognised</span>';
+  return '';
+}
+
+function connectionText() {
+  if (!isLive()) return 'Demo mode: nothing is sent';
+  if (catalog.status === 'ready') return `Connected to ${siteName()} · ${plural(catalog.products.size, 'product')}`;
+  if (catalog.status === 'loading' || catalog.status === 'idle') return `Connecting to ${siteName()}…`;
+  return 'Website not connected';
+}
+
+function renderHome() {
+  const hour = new Date().getHours();
+  $('homeGreeting').textContent = `${hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'} · ${settings.stationId}`;
+  $('homeConnection').textContent = connectionText();
+
+  const units = totalUnits();
+  $('homeResume').classList.toggle('hidden', units === 0);
+  $('homeResumeText').textContent = units
+    ? `${plural(units, 'unit')} across ${plural(state.items.length, 'product')}${state.lastScanAt ? ` · last scan ${fmtShortTime(state.lastScanAt)}` : ''}`
+    : '';
+
+  $('metaScan').textContent = units ? `${plural(units, 'unit')} waiting to be sent` : (isLive() ? `Adds stock to ${siteName()}` : 'Demo mode: nothing is sent');
+  const last = state.history[0];
+  $('metaHistory').textContent = last ? `Last: ${historyStatus(last)[1]} · ${fmtDateTime(last.at)}` : 'Nothing sent yet';
+  $('metaProducts').textContent = catalog.status === 'ready' ? plural(catalog.products.size, 'product')
+    : catalog.status === 'failed' ? 'List not loaded' : 'Loading…';
+  $('metaSettings').textContent = !isLive() ? 'Demo mode' : catalog.status === 'failed' ? 'Website not connected' : `Connected to ${siteName()}`;
+
+  const sentToday = state.history.filter(h => h.ok && !h.duplicate && isToday(h.at));
+  $('todayCounts').textContent = sentToday.length.toLocaleString();
+  $('todayUnits').textContent = sentToday.reduce((sum, h) => sum + h.totalQuantity, 0).toLocaleString();
+  $('todayLast').textContent = sentToday.length ? fmtShortTime(sentToday[0].at) : '—';
+}
+
+function render({ flashKey = null } = {}) {
+  const total = totalUnits();
+  const active = findItem(state.activeKey);
+
+  // Now counting
+  $('activeName').textContent = active ? active.name : 'Waiting for first scan…';
+  $('activeName').classList.toggle('text-slate-400', !active);
+  $('activeMeta').textContent = active
+    ? active.code + (active.productId ? ` · ID ${active.productId}` : '')
+    : 'Scan a QR code or barcode to start counting';
+  $('activeCount').textContent = active ? active.quantity : 0;
+  $('activeBadge').innerHTML = active && !active.known
+    ? itemBadge(active).replace('</span>', ' — check this item</span>') : '';
+
+  $('statProducts').textContent = state.items.length;
+  $('statUnits').textContent = total;
+  $('statLast').textContent = state.lastScanAt ? fmtTime(state.lastScanAt) : '—';
+
+  // Buttons
+  $('okBtn').disabled = !state.items.length || state.submitting;
+  $('recountBtn').disabled = !state.items.length || state.submitting;
+  $('okIcon').innerHTML = state.submitting ? '<span class="spinner"></span>' : ICONS.check;
+  $('okLabel').textContent = state.submitting ? 'Sending…' : (total ? `OK — Add ${total} to stock` : 'OK — Add to stock');
+
+  // Table
+  $('itemsPill').textContent = `${plural(state.items.length, 'product')} · ${plural(total, 'unit')}`;
+  $('emptyState').classList.toggle('hidden', state.items.length > 0);
+  const disabled = state.submitting ? 'disabled' : '';
+  $('itemsBody').innerHTML = state.items.map((item, idx) => {
+    const isActive = item.key === state.activeKey;
+    return `
+      <tr data-key="${esc(item.key)}" class="border-t border-slate-100 ${isActive ? 'bg-brand-50' : 'hover:bg-slate-50'} ${item.key === flashKey ? 'row-flash' : ''}">
+        <td class="px-4 py-3 text-slate-400 tabular-nums">${idx + 1}</td>
+        <td class="px-4 py-3 min-w-[180px]">
+          <div class="flex flex-wrap items-center gap-2 font-medium text-slate-800">${esc(item.name)} ${itemBadge(item)}</div>
+          <div class="text-xs font-mono text-slate-500">${esc(item.code)}${item.productId ? ` · ID ${esc(item.productId)}` : ''}</div>
+        </td>
+        <td class="px-4 py-3">
+          <code class="block max-w-[240px] truncate rounded bg-slate-100 px-2 py-1 text-xs text-slate-600" title="${esc(item.qrData)}">${esc(item.qrData)}</code>
+        </td>
+        <td class="px-4 py-3">
+          <div class="flex items-center justify-center gap-2">
+            <button class="qty-btn" data-act="dec" title="Subtract 1" ${disabled}>−</button>
+            <span class="w-12 text-center text-lg font-semibold tabular-nums ${isActive ? 'text-brand-600' : ''}">${item.quantity}</span>
+            <button class="qty-btn" data-act="inc" title="Add 1" ${disabled}>+</button>
+          </div>
+        </td>
+        <td class="px-4 py-3 text-right">
+          <button class="p-1.5 rounded-md text-slate-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-40" data-act="remove" title="Remove this product" ${disabled}>${ICONS.trash}</button>
+        </td>
+      </tr>`;
+  }).join('');
+
+  $('historyList').innerHTML = state.history.length
+    ? state.history.slice(0, 5).map(h => `<li class="px-4 py-2.5 flex items-center gap-3 text-sm">${historyRowHtml(h, fmtTime(h.at))}</li>`).join('')
+    : '<li class="px-4 py-4 text-sm text-slate-400">No counts sent yet.</li>';
+
+  refreshView();
+}
+
+function historyStatus(h) {
+  if (!h.ok) return ['bg-red-100 text-red-700', 'Failed'];
+  if (h.duplicate) return ['bg-sky-100 text-sky-700', 'Already received'];
+  if (h.demo || h.simulated) return ['bg-amber-100 text-amber-800', 'Demo'];
+  return ['bg-emerald-100 text-emerald-700', 'Sent'];
+}
+
+function historyRowHtml(h, when) {
+  const [cls, label] = historyStatus(h);
+  return `
+    <span class="pill ${cls}">${label}</span>
+    <div class="min-w-0 flex-1 text-left">
+      <div class="font-medium text-slate-700">${plural(h.totalQuantity, 'unit')} · ${plural(h.lines, 'product')}</div>
+      <div class="text-xs text-slate-500 truncate"><span class="font-mono">${esc(h.batchId)}</span>${h.message ? ` — ${esc(h.message)}` : ''}</div>
+    </div>
+    <span class="text-xs text-slate-500 tabular-nums whitespace-nowrap">${when}</span>`;
+}
+
+function renderHistoryPage() {
+  if (!state.history.length) {
+    $('historyPageList').innerHTML = '<p class="px-5 py-10 text-center text-sm text-slate-400">No counts sent yet. They appear here after you press OK.</p>';
+    return;
+  }
+  $('historyPageList').innerHTML = state.history.map(h => {
+    const lines = (h.items || []).map(i => `
+      <tr class="border-t border-slate-100">
+        <td class="py-1.5 pr-3">${esc(i.name)} <span class="ml-1 font-mono text-xs text-slate-400">${esc(i.code)}</span></td>
+        <td class="py-1.5 text-right font-medium tabular-nums">+${i.quantity}</td>
+      </tr>`).join('');
+    return `
+      <details class="group">
+        <summary class="flex cursor-pointer list-none items-center gap-3 px-5 py-3 text-sm hover:bg-slate-50">
+          ${historyRowHtml(h, fmtDateTime(h.at))}
+          ${ICONS.chevron}
+        </summary>
+        <div class="px-5 pb-4 text-sm text-slate-600">
+          ${lines ? `<table class="w-full">${lines}</table>` : '<p class="text-slate-400">No item details were saved for this count.</p>'}
+        </div>
+      </details>`;
+  }).join('');
+}
+
+function renderProducts() {
+  const status = $('productsStatus');
+  const body = $('productsBody');
+  if (catalog.status === 'loading' || catalog.status === 'idle') {
+    status.textContent = 'Loading the product list…';
+    body.innerHTML = '';
+    return;
+  }
+  if (catalog.status === 'failed') {
+    status.innerHTML = `<span class="text-red-600">${esc(catalog.message)}</span>`;
+    body.innerHTML = '';
+    return;
+  }
+
+  const query = $('productSearch').value.trim();
+  const all = [...catalog.products.values()];
+  let list = all;
+  let exact = null;
+  if (query) {
+    const needle = query.toLowerCase();
+    const id = catalog.codes.get(normCode(extractCode(query).code));
+    exact = id ? catalog.products.get(id) : null;
+    list = all.filter(p => p !== exact && [p.name, p.code, p.id].some(v => v.toLowerCase().includes(needle)));
+    if (exact) list.unshift(exact);
+  }
+  const shown = list.slice(0, 200);
+  const source = isLive() ? `from ${siteName()}` : '(demo products)';
+  status.textContent = query
+    ? `${list.length.toLocaleString()} ${list.length === 1 ? 'match' : 'matches'}${list.length > shown.length ? `, showing the first ${shown.length}` : ''}`
+    : `${plural(all.length, 'product')} ${source}${all.length > shown.length ? `, showing the first ${shown.length}. Search to find the rest` : ''}`;
+  body.innerHTML = shown.length ? shown.map(p => `
+    <tr class="border-t border-slate-100 ${p === exact ? 'bg-emerald-50' : 'hover:bg-slate-50'}">
+      <td class="px-4 py-2.5">
+        <span class="font-medium text-slate-800">${esc(p.name || p.code)}</span>
+        ${p === exact ? '<span class="pill ml-2 bg-emerald-100 text-emerald-700">This code</span>' : ''}
+      </td>
+      <td class="px-4 py-2.5 font-mono text-xs">${esc(p.code)}</td>
+      <td class="px-4 py-2.5 font-mono text-xs text-slate-500">${esc(p.id)}</td>
+    </tr>`).join('')
+    : `<tr><td colspan="3" class="px-4 py-10 text-center text-slate-400">No product matches "${esc(query)}".</td></tr>`;
+}
+
+function renderCamera() {
+  const status = cam.busy ? 'busy' : cam.running ? 'on' : 'off';
+  const pill = {
+    on:   ['bg-emerald-100 text-emerald-700', '<span class="dot animate-pulse"></span>Live'],
+    off:  ['bg-slate-100 text-slate-500', 'Off'],
+    busy: ['bg-amber-100 text-amber-700', 'Please wait…'],
+  }[status];
+  $('camStatus').className = `pill ${pill[0]}`;
+  $('camStatus').innerHTML = pill[1];
+
+  const btn = $('camToggleBtn');
+  btn.disabled = cam.busy;
+  btn.textContent = cam.running ? 'Stop camera' : 'Start camera';
+  btn.className = `btn ${cam.running ? 'btn-secondary' : 'btn-primary'}`;
+
+  $('camPlaceholder').classList.toggle('hidden', cam.running || cam.busy);
+  $('cameraSelect').disabled = cam.busy || $('cameraSelect').options.length < 2;
+}
+
+function renderStatus() {
+  const online = navigator.onLine;
+  $('netPill').className = `pill ${online ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`;
+  $('netPill').innerHTML = `<span class="dot"></span>${online ? 'Online' : 'Offline'}`;
+
+  const [cls, label, title] = !isLive()
+    ? ['bg-amber-100 text-amber-800', 'Demo mode', 'Nothing is sent. Open Settings to connect a website.']
+    : catalog.status === 'ready' ? ['bg-emerald-100 text-emerald-700', `Connected · ${plural(catalog.products.size, 'product')}`, `${siteName()}: ${settings.apiUrl}`]
+    : catalog.status === 'failed' ? ['bg-red-100 text-red-700', 'Website not connected', catalog.message]
+    : ['bg-slate-100 text-slate-600', 'Connecting…', settings.apiUrl];
+  $('apiPill').className = `pill hidden sm:inline-flex hover:ring-2 hover:ring-slate-200 ${cls}`;
+  $('apiPill').innerHTML = `<span class="dot"></span>${esc(label)}`;
+  $('apiPill').title = `${title} (click for settings)`;
+
+  $('stationLabel').textContent = settings.stationId;
+  $('soundBtn').innerHTML = prefs.sound ? ICONS.soundOn : ICONS.soundOff;
+  $('soundBtn').setAttribute('aria-label', prefs.sound ? 'Beep on' : 'Beep off');
+
+  const pageActive = document.hasFocus();
+  $('kbdStatus').className = `pill ${pageActive ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-800'}`;
+  $('kbdStatus').innerHTML = pageActive ? '<span class="dot"></span>Ready' : '<span class="dot"></span>Click this page to scan';
+  refreshView();
+}
+
+function renderTestChips() {
+  $('testSection').classList.toggle('hidden', isLive());
+  $('testChips').innerHTML = isLive() ? '' : DEMO_SCANS.map((t, i) => `
+    <button type="button" data-test="${i}" class="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:border-brand-500 hover:text-brand-600" title="${esc(t.code)}">
+      ${esc(t.label)}
+    </button>`).join('');
+}
+
+function renderClock() {
+  const now = new Date();
+  $('clockTime').textContent = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  $('clockDate').textContent = now.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+// =====================================================================
+// FEEDBACK: beep, flashes, toasts, modal
+// =====================================================================
+let audioCtx = null;
+
+function unlockAudio() {
+  try {
+    audioCtx ??= new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  } catch { /* no audio */ }
+}
+
+function beep(kind = 'ok') {
+  if (!prefs.sound) return;
+  const patterns = {
+    ok:    [[1250, 0.07]],
+    warn:  [[880, 0.08], [660, 0.12]],
+    error: [[320, 0.12], [220, 0.2]],
+    done:  [[880, 0.08], [1320, 0.16]],
+  };
+  try {
+    unlockAudio();
+    let t = audioCtx.currentTime + 0.01;
+    for (const [freq, dur] of patterns[kind]) {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'square';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(0.12, t + 0.005);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(t);
+      osc.stop(t + dur + 0.02);
+      t += dur + 0.03;
+    }
+  } catch { /* no audio */ }
+}
+
+function restartAnimation(el, cls) {
+  el.classList.remove('flash-ok', 'flash-warn', cls);
+  void el.offsetWidth; // force reflow so the animation replays
+  el.classList.add(cls);
+}
+
+function scanFeedback(known, source) {
+  beep(known ? 'ok' : 'warn');
+  restartAnimation($('activeCount'), 'pop');
+  restartAnimation($('countCard'), known ? 'flash-ok' : 'flash-warn');
+  if (source === 'camera') restartAnimation($('camFlash'), 'cam-hit');
+}
+
+function toast(message, kind = 'info', ms = 3500) {
+  const border = { success: 'border-emerald-500', error: 'border-red-500', warn: 'border-amber-500', info: 'border-sky-500' }[kind];
+  const host = $('toastHost');
+  while (host.children.length >= 4) host.firstElementChild.remove();
+  const el = document.createElement('div');
+  el.className = `toast rounded-lg border-l-4 ${border} bg-white px-4 py-3 text-sm text-slate-700 shadow-lg`;
+  el.textContent = message;
+  host.appendChild(el);
+  setTimeout(() => {
+    el.classList.add('toast-out');
+    setTimeout(() => el.remove(), 260);
+  }, ms);
+}
+
+let modalResolve = null;
+let modalValidate = null;
+
+// Resolves true (confirm) or false (cancel). The panel itself takes focus rather than
+// the confirm button, so an Enter keystroke from a USB scanner can't confirm by accident.
+function openModal({ title, body, confirmText = 'Confirm', tone = 'primary', focus = null, validate = null, onOpen = null }) {
+  $('modalTitle').textContent = title;
+  $('modalBody').innerHTML = body;
+  $('modalError').classList.add('hidden');
+  $('modalConfirm').textContent = confirmText;
+  $('modalConfirm').className = `btn ${tone === 'danger' ? 'btn-danger' : 'btn-primary'}`;
+  $('modal').classList.remove('hidden');
+  ui.modalOpen = true;
+  modalValidate = validate;
+  onOpen?.();
+  ((focus && $('modalPanel').querySelector(focus)) || $('modalPanel')).focus();
+  return new Promise(resolve => { modalResolve = resolve; });
+}
+
+function closeModal(result) {
+  if (!ui.modalOpen) return;
+  $('modal').classList.add('hidden');
+  ui.modalOpen = false;
+  modalValidate = null;
+  const resolve = modalResolve;
+  modalResolve = null;
+  resolve?.(result);
+  focusScanner();
+}
+
+// =====================================================================
+// EVENTS & STARTUP
+// =====================================================================
+// Any element with data-go="<page>" opens that page.
+document.addEventListener('click', e => {
+  const target = e.target.closest('[data-go]');
+  if (!target) return;
+  e.preventDefault();
+  go(target.dataset.go);
+});
+window.addEventListener('hashchange', () => showView(viewFromHash()));
+
+$('scanForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const value = $('scanInput').value;
+  $('scanInput').value = '';
+  registerScan(value, 'usb');
+});
+
+// Some scanners end with Tab instead of Enter.
+$('scanInput').addEventListener('keydown', e => {
+  if (e.key === 'Tab' && $('scanInput').value.trim()) {
+    e.preventDefault();
+    $('scanForm').requestSubmit();
+  }
+});
+
+// On the counting and Products screens, route stray keystrokes into the scan or search box,
+// so a scan is never lost because focus was on a button or the page background.
+document.addEventListener('keydown', e => {
+  if (ui.modalOpen) {
+    if (e.key === 'Escape') closeModal(false);
+    return;
+  }
+  const box = { scan: 'scanInput', products: 'productSearch' }[ui.view];
+  if (!box || e.ctrlKey || e.metaKey || e.altKey || e.key.length !== 1 || e.key === ' ') return;
+  if (!isTextField(document.activeElement)) $(box).focus({ preventScroll: true });
+});
+
+$('okBtn').addEventListener('click', onOk);
+$('recountBtn').addEventListener('click', onRecount);
+$('settingsSave').addEventListener('click', saveSettings);
+
+$('itemsBody').addEventListener('click', e => {
+  const btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  const key = btn.closest('tr').dataset.key;
+  if (btn.dataset.act === 'inc') changeQuantity(key, +1);
+  if (btn.dataset.act === 'dec') changeQuantity(key, -1);
+  if (btn.dataset.act === 'remove') confirmRemove(key);
+  focusScanner();
+});
+
+$('camToggleBtn').addEventListener('click', () => (cam.running ? stopCamera() : startCamera()));
+
+$('cameraSelect').addEventListener('change', async e => {
+  prefs.cameraId = e.target.value;
+  savePrefs();
+  if (cam.running) {
+    await stopCamera();
+    await startCamera();
+  }
+  focusScanner();
+});
+
+$('mirrorChk').checked = prefs.mirror;
+$('camViewport').classList.toggle('mirror', prefs.mirror);
+$('mirrorChk').addEventListener('change', e => {
+  prefs.mirror = e.target.checked;
+  $('camViewport').classList.toggle('mirror', prefs.mirror);
+  savePrefs();
+  focusScanner();
+});
+
+$('soundBtn').addEventListener('click', () => {
+  prefs.sound = !prefs.sound;
+  savePrefs();
+  renderStatus();
+  if (prefs.sound) beep('ok');
+  focusScanner();
+});
+
+$('modalConfirm').addEventListener('click', () => {
+  const problem = modalValidate?.();
+  if (problem) {
+    $('modalError').textContent = problem;
+    $('modalError').classList.remove('hidden');
+    return;
+  }
+  closeModal(true);
+});
+$('modalCancel').addEventListener('click', () => closeModal(false));
+$('modalBackdrop').addEventListener('click', () => closeModal(false));
+
+$('testChips').addEventListener('click', e => {
+  const btn = e.target.closest('button[data-test]');
+  if (!btn) return;
+  registerScan(DEMO_SCANS[Number(btn.dataset.test)].code, 'test');
+  focusScanner();
+});
+
+// Products page: filter as you type. After a scan (Enter) the text is selected,
+// so the next scan replaces it.
+$('productSearch').addEventListener('input', renderProducts);
+$('productSearch').addEventListener('keydown', e => {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  renderProducts();
+  $('productSearch').select();
+});
+$('productsReload').addEventListener('click', () => loadCatalog());
+
+// Browsers only allow sound after a user gesture.
+document.addEventListener('pointerdown', unlockAudio, { once: true });
+document.addEventListener('keydown', unlockAudio, { once: true });
+
+window.addEventListener('online', () => {
+  renderStatus();
+  if (isLive() && catalog.status === 'failed') loadCatalog();
+});
+window.addEventListener('offline', renderStatus);
+window.addEventListener('focus', renderStatus);
+window.addEventListener('blur', renderStatus);
+
+$('cooldownLabel').textContent = (SAME_CODE_COOLDOWN_MS / 1000).toString();
+
+render();
+renderCamera();
+renderStatus();
+renderTestChips();
+renderClock();
+setInterval(renderClock, 10000);
+showView(viewFromHash());
+applyConnectLink().finally(loadCatalog);
+</script>
+</body>
+</html>

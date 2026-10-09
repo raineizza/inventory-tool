@@ -1,0 +1,7 @@
+# Some Apache setups (CGI/FastCGI, common on shared hosting) drop the Authorization header
+# before PHP sees it. The scanner sends its API token in that header, so pass it through.
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteCond %{HTTP:Authorization} .
+    RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+</IfModule>

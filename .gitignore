@@ -1,0 +1,10 @@
+# Written by stock-api/setup.php when it runs on a website: the database password,
+# the API token and the setup key. Every website makes its own, so they never go in the repository.
+stock-api/config.php
+stock-api/config.*.tmp.php
+stock-api/setup-key.php
+
+# Windows / macOS clutter
+Thumbs.db
+desktop.ini
+.DS_Store
